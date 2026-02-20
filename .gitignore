@@ -1,0 +1,33 @@
+# 编译产物
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.json
+
+# 运行时数据文件
+api_keys.txt
+accounts.txt
+code.json
+referral_codes.json
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+solver/.venv/
+solver/venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
