@@ -17,11 +17,9 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
 )
 
@@ -776,9 +774,7 @@ func startSolver(browsers int, port string) (cleanup func(), err error) {
 		cmd.Stderr = io.Discard
 	}
 
-	if runtime.GOOS == "windows" {
-		cmd.SysProcAttr = &syscall.SysProcAttr{CreationFlags: syscall.CREATE_NEW_PROCESS_GROUP}
-	}
+	setSysProcAttr(cmd)
 
 	slog.Info("启动 Solver", "browsers", browsers, "port", port)
 	if err := cmd.Start(); err != nil {
@@ -824,15 +820,7 @@ func startSolver(browsers int, port string) (cleanup func(), err error) {
 				return
 			}
 			slog.Info("正在停止 Solver 进程树...")
-			if runtime.GOOS == "windows" {
-				/* taskkill /T 杀掉整个进程树（含浏览器子进程） */
-				kill := exec.Command("taskkill", "/T", "/F", "/PID", fmt.Sprintf("%d", cmd.Process.Pid))
-				kill.Stdout = io.Discard
-				kill.Stderr = io.Discard
-				_ = kill.Run()
-			} else {
-				_ = cmd.Process.Kill()
-			}
+			killProcessTree(cmd)
 			/* exitCh 中的 Wait 会在进程结束后返回，这里不再重复 Wait */
 			slog.Info("Solver 已停止")
 		})
@@ -921,7 +909,7 @@ func main() {
 
 	/* 注册信号处理，确保子进程能被清理 */
 	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+	signal.Notify(sigCh, os.Interrupt)
 
 	/*
 	  确保 Solver 可用：
