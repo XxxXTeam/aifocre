@@ -662,10 +662,18 @@ func runCmd(name string, args ...string) error {
 	return cmd.Run()
 }
 
-/*
-installSolverDeps 安装 solver 的 Python 依赖和浏览器。
-优先使用 uv，找不到则 fallback 到 pip。
-*/
+/* runCmdQuiet 静默执行命令，失败时返回包含 stderr 信息的 error */
+func runCmdQuiet(name string, args ...string) error {
+	cmd := exec.Command(name, args...)
+	cmd.Stdout = io.Discard
+	var errBuf bytes.Buffer
+	cmd.Stderr = &errBuf
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("%w: %s", err, errBuf.String())
+	}
+	return nil
+}
+
 func installSolverDeps(solverDir string) error {
 	uvPath, uvErr := exec.LookPath("uv")
 	pipPath, pipErr := exec.LookPath("pip")
@@ -674,14 +682,13 @@ func installSolverDeps(solverDir string) error {
 		return fmt.Errorf("未找到 uv 或 pip，请至少安装其中一个\n  uv: https://docs.astral.sh/uv/getting-started/installation/")
 	}
 
-	/* 安装 Python 依赖 */
-	slog.Info("安装 Solver 依赖...")
+	/* 静默安装 Python 依赖，只在失败时报错 */
 	if uvErr == nil {
-		if err := runCmd(uvPath, "sync", "--project", solverDir); err != nil {
+		if err := runCmdQuiet(uvPath, "sync", "--project", solverDir); err != nil {
 			slog.Warn("uv sync 失败，尝试 pip", "err", err)
 			if pipErr == nil {
 				reqFile := filepath.Join(solverDir, "requirements.txt")
-				if err := runCmd(pipPath, "install", "-r", reqFile); err != nil {
+				if err := runCmdQuiet(pipPath, "install", "-q", "-r", reqFile); err != nil {
 					return fmt.Errorf("pip install 也失败: %w", err)
 				}
 			} else {
@@ -690,20 +697,27 @@ func installSolverDeps(solverDir string) error {
 		}
 	} else {
 		reqFile := filepath.Join(solverDir, "requirements.txt")
-		if err := runCmd(pipPath, "install", "-r", reqFile); err != nil {
+		if err := runCmdQuiet(pipPath, "install", "-q", "-r", reqFile); err != nil {
 			return fmt.Errorf("pip install 失败: %w", err)
 		}
 	}
 
-	/* 安装 patchright 浏览器 */
-	slog.Info("检查 Playwright 浏览器...")
+	/* 静默检查/安装 patchright 浏览器 */
 	if uvErr == nil {
-		if err := runCmd(uvPath, "run", "--project", solverDir, "patchright", "install", "chromium"); err != nil {
-			slog.Warn("通过 uv 安装浏览器失败，尝试直接调用", "err", err)
-			_ = runCmd("patchright", "install", "chromium")
+		if err := runCmdQuiet(uvPath, "run", "--project", solverDir, "patchright", "install", "chromium"); err != nil {
+			_ = runCmdQuiet("patchright", "install", "chromium")
 		}
 	} else {
-		_ = runCmd("patchright", "install", "chromium")
+		_ = runCmdQuiet("patchright", "install", "chromium")
+	}
+
+	/* 静默检查/安装 camoufox 浏览器 */
+	if uvErr == nil {
+		if err := runCmdQuiet(uvPath, "run", "--project", solverDir, "python", "-m", "camoufox", "fetch"); err != nil {
+			_ = runCmdQuiet("python", "-m", "camoufox", "fetch")
+		}
+	} else {
+		_ = runCmdQuiet("python", "-m", "camoufox", "fetch")
 	}
 
 	return nil
@@ -730,9 +744,10 @@ func startSolver(browsers int, port string) (cleanup func(), err error) {
 	if uvErr == nil {
 		args := []string{
 			"run", "--project", solverDir,
-			"python", filepath.Join(solverDir, "api_solver.py"),
+			"python", "api_solver.py",
 			"--thread", fmt.Sprintf("%d", browsers),
 			"--host", "127.0.0.1",
+			"--browser_type", "camoufox",
 			"--port", port,
 		}
 		cmd = exec.Command(uvPath, args...)
@@ -742,15 +757,25 @@ func startSolver(browsers int, port string) (cleanup func(), err error) {
 			pythonPath = p
 		}
 		cmd = exec.Command(pythonPath,
-			filepath.Join(solverDir, "api_solver.py"),
+			"api_solver.py",
 			"--thread", fmt.Sprintf("%d", browsers),
 			"--host", "127.0.0.1",
+			"--browser_type", "camoufox",
 			"--port", port,
 		)
 	}
 
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	/* 设置工作目录为 solver 目录，确保 Python 能找到本地模块 */
+	cmd.Dir = solverDir
+	cmd.Env = append(os.Environ(), "PYTHONIOENCODING=utf-8")
+	cmd.Stdout = io.Discard
+
+	/* 捕获 stderr 用于诊断启动失败 */
+	stderrPipe, pipeErr := cmd.StderrPipe()
+	if pipeErr != nil {
+		cmd.Stderr = io.Discard
+	}
+
 	if runtime.GOOS == "windows" {
 		cmd.SysProcAttr = &syscall.SysProcAttr{CreationFlags: syscall.CREATE_NEW_PROCESS_GROUP}
 	}
@@ -760,19 +785,73 @@ func startSolver(browsers int, port string) (cleanup func(), err error) {
 		return nil, fmt.Errorf("启动 solver 失败: %w", err)
 	}
 
-	cleanup = func() {
-		if cmd.Process != nil {
-			slog.Info("正在停止 Solver...")
-			_ = cmd.Process.Kill()
-			_ = cmd.Wait()
-		}
+	/* 异步捕获 stderr 最后 2KB 用于错误诊断 */
+	var stderrBuf bytes.Buffer
+	if pipeErr == nil {
+		go func() {
+			buf := make([]byte, 4096)
+			for {
+				n, err := stderrPipe.Read(buf)
+				if n > 0 {
+					stderrBuf.Write(buf[:n])
+					/* 只保留最后 2KB */
+					if stderrBuf.Len() > 2048 {
+						b := stderrBuf.Bytes()
+						stderrBuf.Reset()
+						stderrBuf.Write(b[len(b)-2048:])
+					}
+				}
+				if err != nil {
+					return
+				}
+			}
+		}()
 	}
 
-	/* 等待 solver 就绪 */
-	ready := false
+	/* 监控子进程退出 */
+	exitCh := make(chan error, 1)
+	go func() { exitCh <- cmd.Wait() }()
+
+	/*
+	  cleanup 停止 solver 及其所有子进程（浏览器等）。
+	  Windows: taskkill /T /F 杀进程树
+	  Unix: kill 主进程
+	*/
+	var once sync.Once
+	cleanup = func() {
+		once.Do(func() {
+			if cmd.Process == nil {
+				return
+			}
+			slog.Info("正在停止 Solver 进程树...")
+			if runtime.GOOS == "windows" {
+				/* taskkill /T 杀掉整个进程树（含浏览器子进程） */
+				kill := exec.Command("taskkill", "/T", "/F", "/PID", fmt.Sprintf("%d", cmd.Process.Pid))
+				kill.Stdout = io.Discard
+				kill.Stderr = io.Discard
+				_ = kill.Run()
+			} else {
+				_ = cmd.Process.Kill()
+			}
+			/* exitCh 中的 Wait 会在进程结束后返回，这里不再重复 Wait */
+			slog.Info("Solver 已停止")
+		})
+	}
+
+	/* 等待 solver 就绪，同时检测子进程是否已崩溃 */
 	checkURL := fmt.Sprintf("http://127.0.0.1:%s/result?id=health", port)
+	ready := false
 	for i := 0; i < 120; i++ {
-		time.Sleep(1 * time.Second)
+		select {
+		case exitErr := <-exitCh:
+			/* 子进程已退出，说明崩溃了 */
+			errMsg := stderrBuf.String()
+			if errMsg == "" {
+				errMsg = "无 stderr 输出"
+			}
+			return nil, fmt.Errorf("solver 进程已退出(%v):\n%s", exitErr, errMsg)
+		case <-time.After(1 * time.Second):
+		}
 		resp, err := http.Get(checkURL)
 		if err == nil {
 			resp.Body.Close()
@@ -782,6 +861,10 @@ func startSolver(browsers int, port string) (cleanup func(), err error) {
 	}
 	if !ready {
 		cleanup()
+		errMsg := stderrBuf.String()
+		if errMsg != "" {
+			return nil, fmt.Errorf("solver 启动超时（120s）:\n%s", errMsg)
+		}
 		return nil, fmt.Errorf("solver 启动超时（120s），请检查 Python 环境")
 	}
 	slog.Info("Solver 就绪")

@@ -1,0 +1,14 @@
+.git/
+.github/
+solver/.venv/
+solver/venv/
+solver/__pycache__/
+solver/uv.lock
+*.exe
+*.dll
+*.so
+*.dylib
+api_keys.txt
+accounts.txt
+code.json
+referral_codes.json

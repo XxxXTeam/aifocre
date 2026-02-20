@@ -4,8 +4,6 @@
 *.dll
 *.so
 *.dylib
-*.json
-*.txt
 
 # 运行时数据文件
 api_keys.txt
@@ -21,6 +19,7 @@ __pycache__/
 .eggs/
 solver/.venv/
 solver/venv/
+solver/uv.lock
 
 # IDE
 .vscode/
