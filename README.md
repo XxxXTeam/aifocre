@@ -8,19 +8,51 @@
 - **邀请码自循环** — 注册后自动获取邀请码，供后续账号使用，uses 达上限自动轮换
 - **模型批量启用** — 注册完成后自动启用 25 个 AI 模型
 - **多 Solver 实例** — 支持逗号分隔多个 Turnstile Solver 地址，线性扩展吞吐
+- **Solver 联动启动** — 加 `-browsers 8` 即可自动启动/停止 Turnstile Solver，无需手动管理
 - **零外部依赖** — Go 纯标准库实现，单文件编译，无需 CGO
+
+## 前置条件
+
+- **Go** 1.25+
+- **uv** — Python 包管理器（仅使用联动启动时需要）
+  ```bash
+  # 安装 uv (https://docs.astral.sh/uv/)
+  curl -LsSf https://astral.sh/uv/install.sh | sh   # Linux/macOS
+  powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"  # Windows
+  ```
 
 ## 快速开始
 
-### 1. 启动 Turnstile Solver
+### 方式一：联动启动（推荐）
+
+一条命令搞定，Go 自动启动/停止 Solver：
 
 ```bash
-cd solver
-pip install -r requirements.txt
-python api_solver.py --browsers 8 --port 5072
+go build -o aifocre.exe .
+./aifocre -count 50 -concurrent 4 -browsers 8
 ```
 
-### 2. 准备邀请码（可选）
+> 程序会自动通过 `uv` 启动 `solver/api_solver.py`，首次运行时 uv 会自动安装 Python 依赖。
+> 程序结束或 Ctrl+C 时自动停止 Solver 子进程。
+
+### 方式二：手动启动 Solver
+
+```bash
+# 安装依赖（使用 uv）
+cd solver
+uv sync
+
+# 启动 solver
+uv run python api_solver.py --thread 8 --port 5072
+```
+
+然后在另一个终端运行：
+
+```bash
+./aifocre -count 50 -concurrent 4 -workers 8
+```
+
+### 准备邀请码（可选）
 
 在项目目录下创建 `code.json`，格式如下：
 
@@ -32,13 +64,6 @@ python api_solver.py --browsers 8 --port 5072
 
 > 如果没有邀请码，程序也能正常运行，注册后会自动获取并保存。
 
-### 3. 编译运行
-
-```bash
-go build -o aifocre.exe .
-./aifocre -count 50 -concurrent 4
-```
-
 ## 命令行参数
 
 | 参数 | 默认值 | 说明 |
@@ -46,24 +71,25 @@ go build -o aifocre.exe .
 | `-count` | `1` | 注册账号数量 |
 | `-concurrent` | `1` | 注册并发数（同时进行的注册流程） |
 | `-workers` | `concurrent*2` | 验证码预解并发数（应匹配 Solver 的 browser 数） |
+| `-browsers` | `0` | 自动启动 Solver 的浏览器线程数（>0 时联动启动） |
 | `-solver` | `http://127.0.0.1:5072` | Turnstile Solver 地址，多个用逗号分隔 |
 | `-data` | `.` | 数据文件保存目录 |
 
 ## 使用示例
 
 ```bash
-# 基本用法：注册 10 个账号，3 路并发
-go run . -count 10 -concurrent 3
+# 联动启动：自动启动 8 线程 Solver + 4 路并发注册
+./aifocre -count 50 -concurrent 4 -browsers 8
 
-# 指定 workers 匹配 solver 的 8 个浏览器
-go run . -count 50 -concurrent 4 -workers 8
+# 手动 Solver 模式：指定 workers 匹配 solver 的浏览器数
+./aifocre -count 50 -concurrent 4 -workers 8
 
 # 多 solver 实例，吞吐翻倍
-go run . -count 100 -concurrent 6 -workers 16 \
+./aifocre -count 100 -concurrent 6 -workers 16 \
   -solver "http://127.0.0.1:5072,http://127.0.0.1:5073"
 
 # 指定数据目录
-go run . -count 20 -concurrent 3 -data ./output
+./aifocre -count 20 -concurrent 3 -browsers 6 -data ./output
 ```
 
 ## 输出文件
@@ -97,17 +123,25 @@ go run . -count 20 -concurrent 3 -data ./output
 
 ## Solver 目录
 
-`solver/` 包含 Turnstile 验证码解决服务：
+`solver/` 包含 Turnstile 验证码解决服务，使用 [uv](https://docs.astral.sh/uv/) 管理 Python 依赖：
 
-- `api_solver.py` — HTTP API 服务主程序
-- `browser_configs.py` — 浏览器指纹配置
-- `db_results.py` — 任务结果内存存储
-- `requirements.txt` — Python 依赖
+```
+solver/
+├── pyproject.toml      # uv 项目配置和依赖声明
+├── api_solver.py       # HTTP API 服务主程序
+├── browser_configs.py  # 浏览器指纹配置
+├── db_results.py       # 任务结果内存存储
+└── requirements.txt    # pip 兼容依赖（备用）
+```
 
 ```bash
-# 启动参数示例
-python solver/api_solver.py --browsers 8 --port 5072
+# 手动启动 Solver（uv 自动管理虚拟环境和依赖）
+cd solver
+uv run python api_solver.py --thread 8 --port 5072
 ```
+
+> 使用 `-browsers` 联动模式时，Go 会自动调用 `uv run --project solver/ python solver/api_solver.py`，
+> 首次运行 uv 会自动创建虚拟环境并安装依赖，无需手动操作。
 
 ## 构建
 

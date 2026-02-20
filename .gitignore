@@ -5,6 +5,7 @@
 *.so
 *.dylib
 *.json
+*.txt
 
 # 运行时数据文件
 api_keys.txt
