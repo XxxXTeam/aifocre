@@ -23,34 +23,28 @@
 
 ## 快速开始
 
-### 方式一：联动启动（推荐）
-
-一条命令搞定，Go 自动启动/停止 Solver：
-
 ```bash
 go build -o aifocre.exe .
-./aifocre -count 50 -concurrent 4 -browsers 8
+./aifocre -count 50 -concurrent 4
 ```
 
-> 程序会自动通过 `uv` 启动 `solver/api_solver.py`，首次运行时 uv 会自动安装 Python 依赖。
-> 程序结束或 Ctrl+C 时自动停止 Solver 子进程。
+程序启动时会自动：
+1. **探测 Solver** — 尝试连接 `http://127.0.0.1:5072`
+2. **自动唤醒** — 连不上时自动查找 `solver/` 目录，安装依赖（uv 优先，fallback pip），安装浏览器，启动 Solver
+3. **自动清理** — 程序结束或 Ctrl+C 时自动停止 Solver 子进程
 
-### 方式二：手动启动 Solver
+> 首次运行时会自动安装 Python 依赖和 Chromium 浏览器，耗时较长，后续启动秒开。
+
+### 手动启动 Solver（可选）
+
+如果希望独立管理 Solver 进程：
 
 ```bash
-# 安装依赖（使用 uv）
 cd solver
-uv sync
-
-# 启动 solver
 uv run python api_solver.py --thread 8 --port 5072
 ```
 
-然后在另一个终端运行：
-
-```bash
-./aifocre -count 50 -concurrent 4 -workers 8
-```
+程序检测到 Solver 已在运行时会直接使用，不会重复启动。
 
 ### 准备邀请码（可选）
 
@@ -70,26 +64,29 @@ uv run python api_solver.py --thread 8 --port 5072
 |------|--------|------|
 | `-count` | `1` | 注册账号数量 |
 | `-concurrent` | `1` | 注册并发数（同时进行的注册流程） |
-| `-workers` | `concurrent*2` | 验证码预解并发数（应匹配 Solver 的 browser 数） |
-| `-browsers` | `0` | 自动启动 Solver 的浏览器线程数（>0 时联动启动） |
+| `-workers` | `自动` | 验证码预解并发数（默认=browsers 或 concurrent*2） |
+| `-browsers` | `4` | 自动启动 Solver 时的浏览器线程数 |
 | `-solver` | `http://127.0.0.1:5072` | Turnstile Solver 地址，多个用逗号分隔 |
 | `-data` | `.` | 数据文件保存目录 |
 
 ## 使用示例
 
 ```bash
-# 联动启动：自动启动 8 线程 Solver + 4 路并发注册
+# 最简用法：自动探测/启动 Solver
+./aifocre -count 50 -concurrent 4
+
+# 指定 Solver 浏览器数量
 ./aifocre -count 50 -concurrent 4 -browsers 8
 
-# 手动 Solver 模式：指定 workers 匹配 solver 的浏览器数
+# 已有外部 Solver 运行，直接使用
 ./aifocre -count 50 -concurrent 4 -workers 8
 
-# 多 solver 实例，吞吐翻倍
+# 多 solver 实例
 ./aifocre -count 100 -concurrent 6 -workers 16 \
   -solver "http://127.0.0.1:5072,http://127.0.0.1:5073"
 
 # 指定数据目录
-./aifocre -count 20 -concurrent 3 -browsers 6 -data ./output
+./aifocre -count 20 -concurrent 3 -data ./output
 ```
 
 ## 输出文件

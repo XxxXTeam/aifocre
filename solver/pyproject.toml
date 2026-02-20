@@ -10,7 +10,13 @@ dependencies = [
     "rich>=13.7.0",
 ]
 
+[project.scripts]
+turnstile-solver = "api_solver:main"
+
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0.0",
 ]
+
+[tool.uv]
+dev-dependencies = []

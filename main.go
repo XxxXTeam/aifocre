@@ -617,6 +617,10 @@ func doPostSignup(jwt, username, password, dataDir string, store *ReferralStore,
 		_ = store.add(newReferral)
 	}
 }
+
+/*
+findSolverDir 查找 solver 目录，依次尝试可执行文件同级和当前工作目录。
+*/
 func findSolverDir() string {
 	if exe, err := os.Executable(); err == nil {
 		dir := filepath.Join(filepath.Dir(exe), "solver")
@@ -630,34 +634,128 @@ func findSolverDir() string {
 	return ""
 }
 
+/*
+isSolverReachable 检测 solver 是否可连接。
+*/
+func isSolverReachable(solverURL string) bool {
+	u, err := url.Parse(solverURL)
+	if err != nil {
+		return false
+	}
+	checkURL := fmt.Sprintf("%s://%s/result?id=health", u.Scheme, u.Host)
+	client := &http.Client{Timeout: 2 * time.Second}
+	resp, err := client.Get(checkURL)
+	if err != nil {
+		return false
+	}
+	resp.Body.Close()
+	return true
+}
+
+/*
+runCmd 运行命令并将输出打印到 stdout/stderr，返回 error。
+*/
+func runCmd(name string, args ...string) error {
+	cmd := exec.Command(name, args...)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
+}
+
+/*
+installSolverDeps 安装 solver 的 Python 依赖和浏览器。
+优先使用 uv，找不到则 fallback 到 pip。
+*/
+func installSolverDeps(solverDir string) error {
+	uvPath, uvErr := exec.LookPath("uv")
+	pipPath, pipErr := exec.LookPath("pip")
+
+	if uvErr != nil && pipErr != nil {
+		return fmt.Errorf("未找到 uv 或 pip，请至少安装其中一个\n  uv: https://docs.astral.sh/uv/getting-started/installation/")
+	}
+
+	/* 安装 Python 依赖 */
+	slog.Info("安装 Solver 依赖...")
+	if uvErr == nil {
+		if err := runCmd(uvPath, "sync", "--project", solverDir); err != nil {
+			slog.Warn("uv sync 失败，尝试 pip", "err", err)
+			if pipErr == nil {
+				reqFile := filepath.Join(solverDir, "requirements.txt")
+				if err := runCmd(pipPath, "install", "-r", reqFile); err != nil {
+					return fmt.Errorf("pip install 也失败: %w", err)
+				}
+			} else {
+				return fmt.Errorf("uv sync 失败且 pip 不可用: %w", err)
+			}
+		}
+	} else {
+		reqFile := filepath.Join(solverDir, "requirements.txt")
+		if err := runCmd(pipPath, "install", "-r", reqFile); err != nil {
+			return fmt.Errorf("pip install 失败: %w", err)
+		}
+	}
+
+	/* 安装 patchright 浏览器 */
+	slog.Info("检查 Playwright 浏览器...")
+	if uvErr == nil {
+		if err := runCmd(uvPath, "run", "--project", solverDir, "patchright", "install", "chromium"); err != nil {
+			slog.Warn("通过 uv 安装浏览器失败，尝试直接调用", "err", err)
+			_ = runCmd("patchright", "install", "chromium")
+		}
+	} else {
+		_ = runCmd("patchright", "install", "chromium")
+	}
+
+	return nil
+}
+
+/*
+startSolver 启动 Turnstile Solver 子进程。
+自动安装依赖和浏览器，返回 cleanup 函数。
+*/
 func startSolver(browsers int, port string) (cleanup func(), err error) {
 	solverDir := findSolverDir()
 	if solverDir == "" {
 		return nil, fmt.Errorf("未找到 solver 目录，请确保 solver/ 在程序同级或当前目录下")
 	}
 
-	uvPath, err := exec.LookPath("uv")
-	if err != nil {
-		return nil, fmt.Errorf("未找到 uv，请先安装: https://docs.astral.sh/uv/getting-started/installation/")
+	/* 自动安装依赖和浏览器 */
+	if err := installSolverDeps(solverDir); err != nil {
+		return nil, err
 	}
 
-	args := []string{
-		"run", "--project", solverDir,
-		"python", filepath.Join(solverDir, "api_solver.py"),
-		"--thread", fmt.Sprintf("%d", browsers),
-		""
-		"--port", port,
+	/* 构建启动命令：优先 uv run，fallback 到 python */
+	var cmd *exec.Cmd
+	uvPath, uvErr := exec.LookPath("uv")
+	if uvErr == nil {
+		args := []string{
+			"run", "--project", solverDir,
+			"python", filepath.Join(solverDir, "api_solver.py"),
+			"--thread", fmt.Sprintf("%d", browsers),
+			"--host", "127.0.0.1",
+			"--port", port,
+		}
+		cmd = exec.Command(uvPath, args...)
+	} else {
+		pythonPath := "python"
+		if p, err := exec.LookPath("python3"); err == nil {
+			pythonPath = p
+		}
+		cmd = exec.Command(pythonPath,
+			filepath.Join(solverDir, "api_solver.py"),
+			"--thread", fmt.Sprintf("%d", browsers),
+			"--host", "127.0.0.1",
+			"--port", port,
+		)
 	}
 
-	cmd := exec.Command(uvPath, args...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	/* Windows 下需要设置进程组以便一起终止 */
 	if runtime.GOOS == "windows" {
 		cmd.SysProcAttr = &syscall.SysProcAttr{CreationFlags: syscall.CREATE_NEW_PROCESS_GROUP}
 	}
 
-	slog.Info("启动 Solver", "cmd", uvPath, "browsers", browsers, "port", port)
+	slog.Info("启动 Solver", "browsers", browsers, "port", port)
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("启动 solver 失败: %w", err)
 	}
@@ -670,10 +768,10 @@ func startSolver(browsers int, port string) (cleanup func(), err error) {
 		}
 	}
 
-	/* 等待 solver 就绪：轮询 /turnstile 端点 */
+	/* 等待 solver 就绪 */
 	ready := false
 	checkURL := fmt.Sprintf("http://127.0.0.1:%s/result?id=health", port)
-	for i := 0; i < 60; i++ {
+	for i := 0; i < 120; i++ {
 		time.Sleep(1 * time.Second)
 		resp, err := http.Get(checkURL)
 		if err == nil {
@@ -684,47 +782,85 @@ func startSolver(browsers int, port string) (cleanup func(), err error) {
 	}
 	if !ready {
 		cleanup()
-		return nil, fmt.Errorf("solver 启动超时（60s），请检查 uv 和 Python 环境")
+		return nil, fmt.Errorf("solver 启动超时（120s），请检查 Python 环境")
 	}
 	slog.Info("Solver 就绪")
 	return cleanup, nil
 }
 
+/*
+ensureSolver 确保 solver 可用。
+先尝试连接，连不上就自动启动本地 solver。
+返回 cleanup 函数（如果启动了子进程）和实际使用的 browsers 数。
+*/
+func ensureSolver(solverURL string, browsers int) (cleanup func(), actualBrowsers int, err error) {
+	/* 先检测是否已有 solver 在运行 */
+	if isSolverReachable(solverURL) {
+		slog.Info("Solver 已在运行", "url", solverURL)
+		return nil, browsers, nil
+	}
+
+	/* 连不上，尝试自动启动 */
+	slog.Warn("无法连接 Solver，尝试自动启动本地 Solver...", "url", solverURL)
+
+	solverDir := findSolverDir()
+	if solverDir == "" {
+		return nil, 0, fmt.Errorf("无法连接 Solver(%s) 且未找到 solver/ 目录，无法自动启动", solverURL)
+	}
+
+	/* 如果未指定 browsers 数量，默认 4 */
+	if browsers <= 0 {
+		browsers = 4
+	}
+
+	/* 从 URL 提取端口 */
+	port := "5072"
+	if u, err := url.Parse(solverURL); err == nil && u.Port() != "" {
+		port = u.Port()
+	}
+
+	cleanup, err = startSolver(browsers, port)
+	if err != nil {
+		return nil, 0, err
+	}
+	return cleanup, browsers, nil
+}
+
 func main() {
 	count := flag.Int("count", 1, "注册账号数量")
 	concurrent := flag.Int("concurrent", 1, "并发数")
-	workers := flag.Int("workers", 0, "验证码预解并发数 (默认=concurrent*2)")
-	browsers := flag.Int("browsers", 0, "自动启动 Solver 的浏览器线程数 (>0 时自动启动)")
+	workers := flag.Int("workers", 0, "验证码预解并发数 (默认=concurrent*2 或 browsers)")
+	browsers := flag.Int("browsers", 0, "Solver 浏览器线程数 (自动启动时使用，默认4)")
 	solverURL := flag.String("solver", "http://127.0.0.1:5072", "Turnstile Solver 地址 (多个用逗号分隔)")
 	dataDir := flag.String("data", ".", "数据文件保存目录")
 	flag.Parse()
-	if *workers <= 0 {
-		*workers = *concurrent * 2
-	}
 	slog.SetDefault(slog.New(&ColorHandler{level: slog.LevelDebug}))
 
 	/* 注册信号处理，确保子进程能被清理 */
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
 
-	/* 如果指定了 -browsers，自动启动 solver */
-	var solverCleanup func()
-	if *browsers > 0 {
-		/* 从 -solver 中提取端口号 */
-		port := "5072"
-		if u, err := url.Parse(*solverURL); err == nil && u.Port() != "" {
-			port = u.Port()
-		}
-		var err error
-		solverCleanup, err = startSolver(*browsers, port)
-		if err != nil {
-			slog.Error("Solver 启动失败", "err", err)
-			os.Exit(1)
-		}
+	/*
+	  确保 Solver 可用：
+	  1. 先尝试连接已有 solver
+	  2. 连不上 → 自动查找 solver/ 目录 → 安装依赖 → 启动
+	*/
+	firstURL := strings.Split(*solverURL, ",")[0]
+	solverCleanup, actualBrowsers, err := ensureSolver(strings.TrimSpace(firstURL), *browsers)
+	if err != nil {
+		slog.Error("Solver 不可用", "err", err)
+		os.Exit(1)
+	}
+	if solverCleanup != nil {
 		defer solverCleanup()
-		/* 如果 workers 未显式指定，匹配 browser 数量 */
-		if flag.Lookup("workers").DefValue == flag.Lookup("workers").Value.String() {
-			*workers = *browsers
+	}
+
+	/* 确定 workers 数量 */
+	if *workers <= 0 {
+		if actualBrowsers > 0 {
+			*workers = actualBrowsers
+		} else {
+			*workers = *concurrent * 2
 		}
 	}
 
