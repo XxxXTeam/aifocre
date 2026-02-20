@@ -4,7 +4,7 @@
 FROM golang:1.24-bookworm AS builder
 
 WORKDIR /src
-COPY go.mod main.go ./
+COPY go.mod *.go ./
 RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o /aifocre .
 
 ##
