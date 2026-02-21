@@ -197,4 +197,4 @@ git push origin v1.0.0
 
 ## License
 
-MIT
+[GPL-3.0](LICENSE)
